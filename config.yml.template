@@ -1,42 +1,40 @@
 # Required to connect to your outgoing mail server. Example for using gmail:
-# gmail
 SMTP_SERVER: smtp.gmail.com
 SMTP_PORT: 587
-USERNAME: you@gmail.com
-PASSWORD: "you're-password"
-
-TIMEZONE: 'US/Pacific'
+USERNAME: EMAIL@gmail.com
+PASSWORD: "PASSWORD"
 
 PARTICIPANTS:
-  - Chad <chad@somewhere.net>
-  - Jen <jen@gmail.net>
-  - Bill <Bill@somedomain.net>
-  - Sharon <Sharon@hi.org>
+  - PersonA <A@outlook.com>
+  - PersonB <B@gmail.com>
+  - PersonC <C@gmail.com>
+  - PersonD <D@gmail.com>
 
-
-# Warning -- if you mess this up you could get an infinite loop
+# Don't pair these people - e.g. couples
 DONT-PAIR:
-  - Chad, Jen    # Chad and Jen are married
-  - Chad, Bill   # Chad and Bill are best friends
-  - Bill, Sharon
+  - PersonA, PersonB
+
+# Force pair takes precedence over don't pair
+# Person A forced to take person B
+FORCE-PAIR:
+  - PersonC, PersonD
 
 # From address should be the organizer in case participants have any questions
-FROM: You <you@gmail.net>
+FROM: PersonA <A@outlook.com>
 
 # Both SUBJECT and MESSAGE can include variable substitution for the 
 # "santa" and "santee"
-SUBJECT: Your secret santa recipient is {santee}
-MESSAGE: 
+SUBJECT: Your secret santa recipient is...
+
+MESSAGE: |
   Dear {santa},
-  
-  This year you are {santee}'s Secret Santa!. Ho Ho Ho!
-  
-  The maximum spending limit is 50.00
-  
-  
-  This message was automagically generated from a computer. 
-  
-  Nothing could possibly go wrong...
-  
-  http://github.com/underbluewaters/secret-santa
+
+  This year you are {santee}'s Secret Santa! Ho Ho Ho!
+  The maximum spending limit is $25.00
+
+  This message was automagically generated from a computer. Nothing could possibly go wrong...
+
+  Love,
+  PersonA
+
   
