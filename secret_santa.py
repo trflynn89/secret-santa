@@ -1,37 +1,26 @@
-import yaml
-# sudo pip install pyyaml
-import re
-import random
-import smtplib
-import datetime
-import pytz
-import time
-import socket
-import sys
-import getopt
-import os
-
-help_message = '''
-To use, fill out config.yml with your own participants. You can also specify 
-DONT-PAIR so that people don't get assigned their significant other.
-
-You'll also need to specify your mail server settings. An example is provided
-for routing mail through gmail.
-
-For more information, see README.
-'''
+from copy import deepcopy
+from datetime import datetime
+from os import path
+from random import choice
+from random import random
+from re import match
+from smtplib import SMTP
+from socket import gethostname
+from sys import argv
+from time import time
+from yaml import load
 
 REQRD = (
-    'SMTP_SERVER', 
-    'SMTP_PORT', 
-    'USERNAME', 
-    'PASSWORD', 
-    'TIMEZONE', 
-    'PARTICIPANTS', 
-    'DONT-PAIR', 
-    'FROM', 
-    'SUBJECT', 
-    'MESSAGE',
+	'SMTP_SERVER',
+	'SMTP_PORT',
+	'USERNAME',
+	'PASSWORD',
+	'PARTICIPANTS',
+	'DONT-PAIR',
+	'FORCE-PAIR',
+	'FROM',
+	'SUBJECT',
+	'MESSAGE'
 )
 
 HEADER = """Date: {date}
@@ -40,150 +29,180 @@ Message-Id: {message_id}
 From: {frm}
 To: {to}
 Subject: {subject}
-        
+
 """
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.yml')
+CONFIG_PATH = path.join(path.dirname(__file__), 'config.yml')
 
+MAX_TRIES = 100
+
+# Class to store a person's name and email
 class Person:
-    def __init__(self, name, email, invalid_matches):
-        self.name = name
-        self.email = email
-        self.invalid_matches = invalid_matches
-    
-    def __str__(self):
-        return "%s <%s>" % (self.name, self.email)
+	def __init__(self, name, email, invalidMatches):
+		self.name = name
+		self.email = email
+		self.invalidMatches = invalidMatches
+	
+	def __str__(self):
+		return '%s <%s>' % (self.name, self.email)
 
+	def SendEmail(self, server, config, receiver):
+		date = datetime.now().strftime('%a, %d %b %Y %I:%M%p')
+		message_id = '<%s@%s>' % (str(time()) + str(random()), gethostname())
+
+		to = self.email
+		frm = config['FROM']
+		subject = config['SUBJECT'].format(santa=self.name, santee=receiver)
+
+		body = (HEADER + config['MESSAGE']).format(
+			date=date, 
+			message_id=message_id, 
+			frm=frm, 
+			to=to, 
+			subject=subject,
+			santa=self.name,
+			santee=receiver,
+		)
+
+		server.sendmail(frm, [to], body)
+
+# Simple class to store a pair of Person
 class Pair:
-    def __init__(self, giver, reciever):
-        self.giver = giver
-        self.reciever = reciever
-    
-    def __str__(self):
-        return "%s ---> %s" % (self.giver.name, self.reciever.name)
+	def __init__(self, giver, receiver):
+		self.giver = giver
+		self.receiver = receiver
+	
+	def __str__(self):
+		return '%s ---> %s' % (self.giver.name, self.receiver.name)
 
-def parse_yaml(yaml_path=CONFIG_PATH):
-    return yaml.load(open(yaml_path))    
+	# Honor system!
+	def shouldPrintReceiver(self):
+		if self.receiver.name == 'Ted':
+			return False
+		if self.receiver.name == 'Ty':
+			return False
+		if self.receiver.name == 'Wendell':
+			return False
+		return True
 
-def choose_reciever(giver, recievers):
-    choice = random.choice(recievers)
-    if choice.name in giver.invalid_matches or giver.name == choice.name:
-        if len(recievers) is 1:
-            raise Exception('Only one reciever left, try again')
-        return choose_reciever(giver, recievers)
-    else:
-        return choice
+# Parse the YAML config
+def parseYaml(yamlPath):
+	config = load(open(yamlPath)) 
 
-def create_pairs(g, r):
-    givers = g[:]
-    recievers = r[:]
-    pairs = []
-    for giver in givers:
-        try:
-            reciever = choose_reciever(giver, recievers)
-            recievers.remove(reciever)
-            pairs.append(Pair(giver, reciever))
-        except:
-            return create_pairs(g, r)
-    return pairs
+	for key in REQRD:
+		if key not in config.keys():
+			raise Exception('Required parameter %s not in yaml config file!' % (key))
 
+	return config
 
-class Usage(Exception):
-    def __init__(self, msg):
-        self.msg = msg
+# Choose a receiver for a person after removing invalid matches and ourself
+# from the list of receivers
+def chooseReceiver(giver, receivers):
+	receivers = [r for r in receivers if r.name not in giver.invalidMatches]
+	receivers = [r for r in receivers if r.name != giver.name]
 
+	return None if (len(receivers) == 0) else choice(receivers)
 
-def main(argv=None):
-    if argv is None:
-        argv = sys.argv
-    try:
-        try:
-            opts, args = getopt.getopt(argv[1:], "shc", ["send", "help"])
-        except getopt.error, msg:
-            raise Usage(msg)
-    
-        # option processing
-        send = False
-        for option, value in opts:
-            if option in ("-s", "--send"):
-                send = True
-            if option in ("-h", "--help"):
-                raise Usage(help_message)
-                
-        config = parse_yaml()
-        for key in REQRD:
-            if key not in config.keys():
-                raise Exception(
-                    'Required parameter %s not in yaml config file!' % (key,))
+# Iterate thru the list of people and randomly create pairs. Return None if the
+# random choices led to an impossible list of pairings.
+def createPairs(people):
+	receivers = deepcopy(people)
+	pairs = []
 
-        participants = config['PARTICIPANTS']
-        dont_pair = config['DONT-PAIR']
-        if len(participants) < 2:
-            raise Exception('Not enough participants specified.')
-        
-        givers = []
-        for person in participants:
-            name, email = re.match(r'([^<]*)<([^>]*)>', person).groups()
-            name = name.strip()
-            invalid_matches = []
-            for pair in dont_pair:
-                names = [n.strip() for n in pair.split(',')]
-                if name in names:
-                    # is part of this pair
-                    for member in names:
-                        if name != member:
-                            invalid_matches.append(member)
-            person = Person(name, email, invalid_matches)
-            givers.append(person)
-        
-        recievers = givers[:]
-        pairs = create_pairs(givers, recievers)
-        if not send:
-            print """
-Test pairings:
-                
-%s
-                
-To send out emails with new pairings,
-call with the --send argument:
+	for giver in people:
+		receiver = chooseReceiver(giver, receivers)
 
-    $ python secret_santa.py --send
-            
-            """ % ("\n".join([str(p) for p in pairs]))
-        
-        if send:
-            server = smtplib.SMTP(config['SMTP_SERVER'], config['SMTP_PORT'])
-            server.starttls()
-            server.login(config['USERNAME'], config['PASSWORD'])
-        for pair in pairs:
-            zone = pytz.timezone(config['TIMEZONE'])
-            now = zone.localize(datetime.datetime.now())
-            date = now.strftime('%a, %d %b %Y %T %Z') # Sun, 21 Dec 2008 06:25:23 +0000
-            message_id = '<%s@%s>' % (str(time.time())+str(random.random()), socket.gethostname())
-            frm = config['FROM']
-            to = pair.giver.email
-            subject = config['SUBJECT'].format(santa=pair.giver.name, santee=pair.reciever.name)
-            body = (HEADER+config['MESSAGE']).format(
-                date=date, 
-                message_id=message_id, 
-                frm=frm, 
-                to=to, 
-                subject=subject,
-                santa=pair.giver.name,
-                santee=pair.reciever.name,
-            )
-            if send:
-                result = server.sendmail(frm, [to], body)
-                print "Emailed %s <%s>" % (pair.giver.name, to)
+		if receiver is not None:
+			receivers.remove(receiver)
+			pairs.append(Pair(giver, receiver))
+		else:
+			return None
 
-        if send:
-            server.quit()
-        
-    except Usage, err:
-        print >> sys.stderr, sys.argv[0].split("/")[-1] + ": " + str(err.msg)
-        print >> sys.stderr, "\t for help use --help"
-        return 2
+	return pairs
 
+# Extract name from string of the form "Name <Email@example.com>"
+def extractName(str):
+	expr = r'([^<]*)<([^>]*)>'
+	return match(expr, str).group(1).strip()
 
-if __name__ == "__main__":
-    sys.exit(main())
+# Extract email from string of the form "Name <Email@example.com>"
+def extractEmail(str):
+	expr = r'([^<]*)<([^>]*)>'
+	return match(expr, str).group(2).strip()
+
+# Find a set of valid pairings, or None if one could not be found in NUM_TRIES
+def findPairs(config):
+	participants = config['PARTICIPANTS']
+	if len(participants) < 2:
+		raise Exception('Not enough participants specified.')
+
+	people = []
+	dontPair = config['DONT-PAIR']
+	forcePair = config['FORCE-PAIR']
+
+	for person in participants:
+		invalidMatches = []
+		name = extractName(person)
+		email = extractEmail(person)
+
+		# First, check DONT-PAIR option
+		for pair in dontPair:
+			names = [n.strip() for n in pair.split(',')]
+			invalidMatches.extend([p for p in names if name in names])
+
+		# Next, check FORCE-PAIR option - add everyone except the forcibly
+		# paired person to the invalidMatches list
+		for pair in forcePair:
+			names = [n.strip() for n in pair.split(',')]
+
+			if name == names[0]:
+				invalidMatches = [extractName(p) for p in participants]
+				invalidMatches = [n for n in invalidMatches if n not in names]
+				break
+
+		# Append to list of people
+		people.append(Person(name, email, invalidMatches))
+	
+	# Try MAX_TRIES times to create the pairings
+	for n in range(MAX_TRIES):
+		pairs = createPairs(people)
+
+		if pairs is not None:
+			print 'Pairings:\n\n%s\n' % ('\n'.join([str(p) for p in pairs if p.shouldPrintReceiver()]))
+			break
+
+	return pairs
+
+# Main loop
+def main():
+	config = parseYaml(CONFIG_PATH)
+	send = '-s' in argv[1 : ]
+
+	pairs = findPairs(config)
+
+	# Print the pairings and send emails
+	if pairs is not None:
+		ok = False
+		while not ok:
+			ok = (raw_input('Is this okay? [y/n] ') == 'y')
+
+			if not ok:
+				findPairs(config)
+
+		if send:
+			server = SMTP(config['SMTP_SERVER'], config['SMTP_PORT'])
+			server.starttls()
+			server.login(config['USERNAME'], config['PASSWORD'])
+
+			for pair in pairs:
+				pair.giver.SendEmail(server, config, pair.receiver.name)
+				print 'Emailed %s' % str(pair.giver)
+
+			server.quit()
+
+	else:
+		print 'Could not find a valid pairings list in %d tries, please check your config' % MAX_TRIES
+
+if __name__ == '__main__':
+	main()
+	
