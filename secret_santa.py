@@ -1,208 +1,327 @@
-from copy import deepcopy
-from datetime import datetime
-from os import path
-from random import choice
-from random import random
-from re import match
-from smtplib import SMTP
-from socket import gethostname
-from sys import argv
-from time import time
-from yaml import load
-
-REQRD = (
-	'SMTP_SERVER',
-	'SMTP_PORT',
-	'USERNAME',
-	'PASSWORD',
-	'PARTICIPANTS',
-	'DONT-PAIR',
-	'FORCE-PAIR',
-	'FROM',
-	'SUBJECT',
-	'MESSAGE'
-)
-
-HEADER = """Date: {date}
-Content-Type: text/plain; charset="utf-8"
-Message-Id: {message_id}
-From: {frm}
-To: {to}
-Subject: {subject}
-
 """
+Secret Santa made easy! Copy config.yml.template to config.yml and fill out the
+options. Run this program to create random Secret Santa assignments and to
+email participants their assignments.
 
-CONFIG_PATH = path.join(path.dirname(__file__), 'config.yml')
+Examples
+--------
+Create assignments, but don't send emails (useful for debugging configuration):
 
-MAX_TRIES = 100
+    python secret_santa.py
 
-# Class to store a person's name and email
-class Person:
-	def __init__(self, name, email, invalidMatches):
-		self.name = name
-		self.email = email
-		self.invalidMatches = invalidMatches
-	
-	def __str__(self):
-		return '%s <%s>' % (self.name, self.email)
+Create assignments and send emails:
 
-	def SendEmail(self, server, config, receiver):
-		date = datetime.now().strftime('%a, %d %b %Y %I:%M%p')
-		message_id = '<%s@%s>' % (str(time()) + str(random()), gethostname())
+    python secret_santa.py -s
+"""
+import argparse
+import copy
+import datetime
+import getpass
+import random
+import re
+import smtplib
+import socket
+import time
+import yaml
 
-		to = self.email
-		frm = config['FROM']
-		subject = config['SUBJECT'].format(santa=self.name, santee=receiver)
+def repeat_if_failed(tries, exceptions):
+    """
+    Decorator to repeat a function up to a maxiumum number of tries until it
+    succeeds (i.e. does not throw an exception). If the maximum attempts are
+    exceeded, re-raise the last exception.
 
-		body = (HEADER + config['MESSAGE']).format(
-			date=date, 
-			message_id=message_id, 
-			frm=frm, 
-			to=to, 
-			subject=subject,
-			santa=self.name,
-			santee=receiver,
-		)
+    Paramaters
+    ----------
+    tries : int
+        Maximum number of attempts to make the function call.
+    exceptions : tuple of Exception
+        Tuple of exception classes that are acceptable to be thrown.
+    """
+    def outer_wrapper(func):
+        def inner_wrapper(*args, **kwargs):
+            for _ in range(tries):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as ex:
+                    pass
 
-		server.sendmail(frm, [to], body)
+            raise ex
 
-# Simple class to store a pair of Person
-class Pair:
-	def __init__(self, giver, receiver):
-		self.giver = giver
-		self.receiver = receiver
-	
-	def __str__(self):
-		return '%s ---> %s' % (self.giver.name, self.receiver.name)
+        return inner_wrapper
+    return outer_wrapper
 
-	# Honor system!
-	def shouldPrintReceiver(self):
-		if self.receiver.name == 'Ted':
-			return False
-		if self.receiver.name == 'Ty':
-			return False
-		if self.receiver.name == 'Wendell':
-			return False
-		return True
+class SecretSantaException(Exception):
+    """
+    Base exception class for this module.
+    """
+    pass
 
-# Parse the YAML config
-def parseYaml(yamlPath):
-	config = load(open(yamlPath)) 
+class SecretSanta(object):
+    """
+    Class to represent a kindly Secret Santa. Used to create a Secret Santa
+    assignment for this Santa and to notify the Santa via email.
 
-	for key in REQRD:
-		if key not in config.keys():
-			raise Exception('Required parameter %s not in yaml config file!' % (key))
+    Attributes
+    ----------
+    name : str
+        Name of this Santa.
+    email : str
+        Email address for this Santa.
+    invalid_matches : list of str
+        List of names that should not be assigned to this Santa.
+    santee : SecretSanta
+        The luckly recipient of this Santa's gift.
 
-	return config
+    Parameters
+    ----------
+    name : str
+        Name of this Santa.
+    email : str
+        Email address for this Santa.
+    invalid_matches : list of str
+        List of names that should not be assigned to this Santa.
+    """
+    def __init__(self, name, email, invalid_matches):
+        self.name = name
+        self.email = email
+        self.invalid_matches = invalid_matches + [self.name]
+        self.santee = None
 
-# Choose a receiver for a person after removing invalid matches and ourself
-# from the list of receivers
-def chooseReceiver(giver, receivers):
-	receivers = [r for r in receivers if r.name not in giver.invalidMatches]
-	receivers = [r for r in receivers if r.name != giver.name]
+    def __str__(self):
+        return '%s ---> %s' % (self.name, self.santee.name if self.santee else str())
 
-	return None if (len(receivers) == 0) else choice(receivers)
+    def assign_santee(self, santees):
+        """
+        Create a random assignment for this Santa from the given list of people,
+        excluding this Santa's invalid matches.
 
-# Iterate thru the list of people and randomly create pairs. Return None if the
-# random choices led to an impossible list of pairings.
-def createPairs(people):
-	receivers = deepcopy(people)
-	pairs = []
+        Parameters
+        ----------
+        santees : list of Santa
+            List of candidate assignments.
+        """
+        candidates = [s for s in santees if s.name not in self.invalid_matches]
+        self.santee = random.choice(candidates) if candidates else None
 
-	for giver in people:
-		receiver = chooseReceiver(giver, receivers)
+    def send_email(self, session, config):
+        """
+        Send this Santa an email with their assignment.
 
-		if receiver is not None:
-			receivers.remove(receiver)
-			pairs.append(Pair(giver, receiver))
-		else:
-			return None
+        Parameters
+        ----------
+        session : smtplib.SMTP
+            SMTP session to send the email over.
+        config : Config
+            Secret Santa configuration.
+        """
+        date = datetime.datetime.now().strftime('%a, %d %b %Y %I:%M%p')
+        message_id = '<%f%f@%s>' % (time.time(), random.random(), socket.gethostname())
 
-	return pairs
+        sender = config['FROM']
+        receiver = self.email
+        subject = config['SUBJECT'].format(santa=self.name, santee=self.santee.name)
 
-# Extract name from string of the form "Name <Email@example.com>"
-def extractName(str):
-	expr = r'([^<]*)<([^>]*)>'
-	return match(expr, str).group(1).strip()
+        body = (Config.EMAIL_HEADER + config['MESSAGE']).format(
+            sender=sender,
+            receiver=receiver,
+            date=date,
+            message_id=message_id,
+            subject=subject,
+            santa=self.name,
+            santee=self.santee.name,
+        )
 
-# Extract email from string of the form "Name <Email@example.com>"
-def extractEmail(str):
-	expr = r'([^<]*)<([^>]*)>'
-	return match(expr, str).group(2).strip()
+        session.sendmail(sender, [receiver], body)
 
-# Find a set of valid pairings, or None if one could not be found in NUM_TRIES
-def findPairs(config):
-	participants = config['PARTICIPANTS']
-	if len(participants) < 2:
-		raise Exception('Not enough participants specified.')
+class Config(dict):
+    """
+    Dictionary-like configuration class to parse the Secret Santa YAML config
+    file and store/parse its contents.
 
-	people = []
-	dontPair = config['DONT-PAIR']
-	forcePair = config['FORCE-PAIR']
+    Attributes
+    ----------
+    config : dict
+        Dictionary of parsed configuration key/value mappings.
 
-	for person in participants:
-		invalidMatches = []
-		name = extractName(person)
-		email = extractEmail(person)
+    Parameters
+    ----------
+    yaml_path : str
+        Path to the YAML configuration file.
 
-		# First, check DONT-PAIR option
-		for pair in dontPair:
-			names = [n.strip() for n in pair.split(',')]
-			invalidMatches.extend([p for p in names if name in names])
+    Raises
+    ------
+    SecretSantaException
+        - The YAML config file does not contain all required configs.
+        - The YAML config file contains an invalid config.
+    """
+    REQUIRED_CONFIGS = [
+        'SMTP_SERVER',
+        'SMTP_PORT',
+        'USERNAME',
+        'PARTICIPANTS',
+        'FROM',
+        'SUBJECT',
+        'MESSAGE'
+    ]
 
-		# Next, check FORCE-PAIR option - add everyone except the forcibly
-		# paired person to the invalidMatches list
-		for pair in forcePair:
-			names = [n.strip() for n in pair.split(',')]
+    OPTIONAL_CONFIGS = {
+        'PASSWORD' : getpass.getpass,
+        'DONT_PAIR' : list
+    }
 
-			if name == names[0]:
-				invalidMatches = [extractName(p) for p in participants]
-				invalidMatches = [n for n in invalidMatches if n not in names]
-				break
+    EMAIL_HEADER = (
+        'Date: {date}\n'
+        'Content-Type: text/plain; charset="utf-8"\n'
+        'Message-Id: {message_id}\n'
+        'From: {sender}\n'
+        'To: {receiver}\n'
+        'Subject: {subject}\n'
+        '\n'
+    )
 
-		# Append to list of people
-		people.append(Person(name, email, invalidMatches))
-	
-	# Try MAX_TRIES times to create the pairings
-	for n in range(MAX_TRIES):
-		pairs = createPairs(people)
+    NAME_AND_EMAIL_REGEX = re.compile(r'([^<]*)<([^>]*)>')
 
-		if pairs is not None:
-			print 'Pairings:\n\n%s\n' % ('\n'.join([str(p) for p in pairs if p.shouldPrintReceiver()]))
-			break
+    def __init__(self, yaml_path):
+        with open(yaml_path, 'r') as yaml_file:
+            self.config = yaml.safe_load(yaml_file)
 
-	return pairs
+        # Check config requirements
+        if not all([r in self.config for r in Config.REQUIRED_CONFIGS]):
+            raise SecretSantaException('Did not find all required configs')
 
-# Main loop
+        elif len(self.config['PARTICIPANTS']) < 2:
+            raise SecretSantaException('Not enough participants specified')
+
+        # Check config optionals
+        for (key, default) in Config.OPTIONAL_CONFIGS.iteritems():
+            if key not in self.config:
+                self.config[key] = default()
+
+    def __getitem__(self, key):
+        return self.config[key]
+
+    def __contains__(self, key):
+        return key in self.config
+
+    def parse_name_and_email(self, name_and_email):
+        """
+        Extract the name and email from a string of the form
+        'name <email@server.com>'.
+
+        Parameters
+        ----------
+        name_and_email : str
+            String containing the name and email to extract.
+
+        Returns
+        -------
+        tuple
+            A tuple of the form (name : str, email : str).
+
+        Raises
+        ------
+        SecretSantaException
+            - If the input string could not be parsed.
+        """
+        match = Config.NAME_AND_EMAIL_REGEX.match(name_and_email)
+
+        if match:
+            return (match.group(1).strip(), match.group(2).strip())
+
+        raise SecretSantaException('Could not parse name/email: %s' % (name_and_email))
+
+@repeat_if_failed(tries=100, exceptions=(SecretSantaException, ))
+def assign_santees(santas):
+    """
+    Iterate through each Santa and create random assignments for each Santa.
+
+    Parameters
+    ----------
+    santas : list of Santa
+        List of Santas to create assignments for.
+
+    Raises
+    ------
+    SecretSantaException
+        - Not all Santas could be given an assignment.
+    """
+    santees = copy.deepcopy(santas)
+
+    for santa in santas:
+        santa.assign_santee(santees)
+
+        if not santa.santee:
+            raise SecretSantaException('Could not find santee for %s' % (santa.name))
+
+        santees.remove(santa.santee)
+
+def create_santas(config):
+    """
+    Create a valid set of Santas and create their random assignments.
+
+    Parameters
+    ----------
+    config : Config
+        Secret Santa configuration.
+
+    Returns
+    ----------
+    list of Santa
+        List of created Santas.
+    """
+    santas = list()
+
+    participants = config['PARTICIPANTS']
+    dont_pair = config['DONT_PAIR']
+
+    for person in participants:
+        (name, email) = config.parse_name_and_email(person)
+        invalid_matches = list()
+
+        for pair in dont_pair:
+            names = [n.strip() for n in pair.split(',')]
+            invalid_matches.extend([p for p in names if name in names])
+
+        santas.append(SecretSanta(name, email, invalid_matches))
+
+    assign_santees(santas)
+    return santas
+
 def main():
-	config = parseYaml(CONFIG_PATH)
-	send = '-s' in argv[1 : ]
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__)
 
-	pairs = findPairs(config)
+    parser.add_argument(
+        '-s', '--send-emails', action='store_true',
+        help='If set, send emails to all participants. Exclude for debugging.')
+    parser.add_argument(
+        '-c', '--config-path', default='config.yml',
+        help='Path to the YAML configuration file.')
 
-	# Print the pairings and send emails
-	if pairs is not None:
-		ok = False
-		while not ok:
-			ok = (raw_input('Is this okay? [y/n] ') == 'y')
+    args = parser.parse_args()
+    config = Config(args.config_path)
 
-			if not ok:
-				findPairs(config)
+    while True:
+        santas = create_santas(config)
 
-		if send:
-			server = SMTP(config['SMTP_SERVER'], config['SMTP_PORT'])
-			server.starttls()
-			server.login(config['USERNAME'], config['PASSWORD'])
+        print '\n%s\n' % ('\n'.join([str(s) for s in santas]))
 
-			for pair in pairs:
-				pair.giver.SendEmail(server, config, pair.receiver.name)
-				print 'Emailed %s' % str(pair.giver)
+        if raw_input('Is this okay? [y/n]: ') == 'y':
+            break
 
-			server.quit()
+    if args.send_emails:
+        try:
+            session = smtplib.SMTP(config['SMTP_SERVER'], config['SMTP_PORT'])
+            session.starttls()
+            session.login(config['USERNAME'], config['PASSWORD'])
 
-	else:
-		print 'Could not find a valid pairings list in %d tries, please check your config' % MAX_TRIES
+            for santa in santas:
+                print 'Emailing %s <%s>' % (santa.name, santa.email)
+                santa.send_email(session, config)
+
+        finally:
+            session.quit()
 
 if __name__ == '__main__':
-	main()
-	
+    main()

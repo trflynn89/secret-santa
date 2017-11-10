@@ -1,4 +1,5 @@
-# Required to connect to your outgoing mail server. Example for using gmail:
+# Required to connect to your outgoing mail server. Password may be excluded,
+# in which case it will be queried at run time. Example for using gmail:
 SMTP_SERVER: smtp.gmail.com
 SMTP_PORT: 587
 USERNAME: EMAIL@gmail.com
@@ -11,18 +12,13 @@ PARTICIPANTS:
   - PersonD <D@gmail.com>
 
 # Don't pair these people - e.g. couples
-DONT-PAIR:
+DONT_PAIR:
   - PersonA, PersonB
-
-# Force pair takes precedence over don't pair
-# Person A forced to take person B
-FORCE-PAIR:
-  - PersonC, PersonD
 
 # From address should be the organizer in case participants have any questions
 FROM: PersonA <A@outlook.com>
 
-# Both SUBJECT and MESSAGE can include variable substitution for the 
+# Both SUBJECT and MESSAGE can include variable substitution for the
 # "santa" and "santee"
 SUBJECT: Your secret santa recipient is...
 
@@ -37,4 +33,4 @@ MESSAGE: |
   Love,
   PersonA
 
-  
+
